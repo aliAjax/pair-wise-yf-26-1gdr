@@ -13,6 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
+import retirement_rules
+import retirement_schema
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = BASE_DIR / "preservation.db"
 MAX_FILE_SIZE = 10 * 1024 * 1024
@@ -146,6 +149,7 @@ class PreservationStore:
                 );
                 """
             )
+            retirement_schema.ensure_schema(conn)
 
     def seed(self) -> None:
         self.init_schema()
@@ -305,7 +309,7 @@ class PreservationStore:
                 "SELECT path,sha256,size FROM archive_files WHERE version_id=? ORDER BY path", (version_id,)
             ).fetchall()
             copies = conn.execute(
-                "SELECT id,location,state,last_verified_at FROM copies WHERE version_id=? ORDER BY id", (version_id,)
+                "SELECT id,location,state,last_verified_at,retired_at FROM copies WHERE version_id=? ORDER BY id", (version_id,)
             ).fetchall()
             archive = conn.execute("SELECT * FROM archives WHERE id=?", (version["archive_id"],)).fetchone()
             return {"version": dict(version), "archive": dict(archive), "files": [dict(x) for x in files], "copies": [dict(x) for x in copies]}
@@ -331,7 +335,7 @@ class PreservationStore:
                 else:
                     conn.execute("UPDATE copies SET state='corrupt',last_verified_at=? WHERE id=?", (now(), copy_id))
                     healthy = conn.execute(
-                        "SELECT id FROM copies WHERE version_id=? AND id<>? AND state='healthy' ORDER BY last_verified_at DESC LIMIT 1",
+                        "SELECT id FROM copies WHERE version_id=? AND id<>? AND state='healthy' AND retired_at IS NULL ORDER BY last_verified_at DESC LIMIT 1",
                         (copy["version_id"], copy_id),
                     ).fetchone()
                     result_state = "degraded"
@@ -446,6 +450,25 @@ class PreservationStore:
                 "audit": [dict(r) | {"detail": json.loads(r["detail"])} for r in conn.execute("SELECT * FROM audit_log WHERE archive_id=? ORDER BY id", (archive_id,)).fetchall()],
             }
 
+    def _call_rule(self, rule_fn, *args):
+        """规则层 RuleError 统一转换为 BusinessError。"""
+        try:
+            return rule_fn(self, *args)
+        except retirement_rules.RuleError as exc:
+            raise BusinessError(exc.message, exc.status, exc.code)
+
+    def request_retirement(self, actor_id: str, copy_id: int, successor_location: str, custodian: str) -> dict:
+        return self._call_rule(retirement_rules.request_retirement, actor_id, copy_id, successor_location, custodian)
+
+    def review_retirement(self, actor_id: str, request_id: int) -> dict:
+        return self._call_rule(retirement_rules.review_retirement, actor_id, request_id)
+
+    def get_retirement_request(self, user_id: str, request_id: int) -> dict:
+        return self._call_rule(retirement_rules.get_request, user_id, request_id)
+
+    def list_retirements(self, user_id: str, version_id: int) -> list[dict]:
+        return self._call_rule(retirement_rules.list_for_version, user_id, version_id)
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Preservation/1.0"
@@ -471,18 +494,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_html(self, name: str) -> None:
+        body = (BASE_DIR / "web" / name).read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _dispatch(self, method: str) -> None:
         path = urlparse(self.path).path.rstrip("/") or "/"
         parts = [p for p in path.split("/") if p]
         user = self.headers.get("X-User-Id", "")
         if method == "GET" and path == "/":
-            body = (BASE_DIR / "web" / "index.html").read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+            return self._send_html("index.html")
+        if method == "GET" and path == "/retirement":
+            return self._send_html("retirement.html")
         if method == "GET" and path == "/health":
             return self._send(200, {"ok": True})
         store = self._store()
@@ -512,6 +539,15 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "copies"] and parts[3] == "simulate-corruption" and method == "POST":
             d = self._body()
             return self._send(200, store.simulate_corruption(user, int(parts[2]), d.get("path", "")))
+        if len(parts) == 4 and parts[:2] == ["api", "copies"] and parts[3] == "retirement-requests" and method == "POST":
+            d = self._body()
+            return self._send(201, store.request_retirement(user, int(parts[2]), d.get("successor_location", ""), d.get("custodian", "")))
+        if len(parts) == 3 and parts[:2] == ["api", "retirement-requests"] and method == "GET":
+            return self._send(200, store.get_retirement_request(user, int(parts[2])))
+        if len(parts) == 4 and parts[:2] == ["api", "retirement-requests"] and parts[3] == "review" and method == "POST":
+            return self._send(200, store.review_retirement(user, int(parts[2])))
+        if len(parts) == 4 and parts[:2] == ["api", "versions"] and parts[3] == "retirement-requests" and method == "GET":
+            return self._send(200, store.list_retirements(user, int(parts[2])))
         raise BusinessError("接口不存在", 404, "not_found")
 
     def _handle(self, method: str) -> None:

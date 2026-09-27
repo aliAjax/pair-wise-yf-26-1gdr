@@ -28,5 +28,11 @@ python3 -m unittest -v
 - `POST /api/copies/{id}/simulate-corruption`：演示/测试介质损坏，仅 owner 或 archivist 可用。
 - `POST /api/versions/{id}/migrate`：生成格式迁移后的新版本并保留派生关系。
 - `GET /api/archives/{id}/status`：保留期限、版本状态和审计记录。
+- `POST /api/copies/{id}/retirement-requests`：登记副本退役申请（接手位置、保管人），进入待复核。
+- `GET /api/retirement-requests/{id}`：查看退役申请；待复核申请附带实时阻塞项与比对明细。
+- `POST /api/retirement-requests/{id}/review`：复核申请；条件全部满足则确认退役，否则退回并列出阻塞项。
+- `GET /api/versions/{id}/retirement-requests`：版本的退役申请记录。
+
+副本退役交接分为三个业务文件：`retirement_schema.py`（数据表：退役申请单、副本 `retired_at` 标记）、`retirement_rules.py`（规则：登记、复核、确认与版本状态重算）、`web/retirement.html`（页面，地址 `/retirement`）。确认条件：至少一份其他健康副本完成内容比对且与版本清单一致，且退役副本最近核验晚于版本生成；确认后旧副本标记退役并留档，版本状态按剩余健康副本重算，全程写审计日志。
 
 档案路径拒绝绝对路径和 `..`；同一版本副本位置唯一；没有健康副本时版本标记为 `degraded`；所有变更写入审计日志。

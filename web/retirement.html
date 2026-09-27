@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>副本退役交接</title>
+<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}input,textarea,button,select{font:inherit;padding:8px;margin:4px}.panel{border:1px solid #bbb;padding:16px;border-radius:8px;margin:12px 0}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}</style></head>
+<body><h1>副本退役交接</h1>
+<p>流程：登记待退役副本的接手位置与保管人 → 申请进入待复核 → 复核时校验「其他健康副本完成内容比对」且「退役副本最近核验晚于版本生成」，全部满足才确认退役，否则退回并列出阻塞项。<a href="/">返回档案状态页</a></p>
+<section class="panel"><label>操作账号 <select id="user"><option>owner</option><option>archivist</option><option>auditor</option><option>outsider</option></select></label></section>
+<section class="panel"><h2>1. 登记退役申请</h2>
+<input id="copyId" type="number" placeholder="待退役副本 ID"><input id="successor" placeholder="接手位置，如 offline-disk-c"><input id="custodian" placeholder="保管人">
+<button onclick="createRequest()">提交申请（待复核）</button></section>
+<section class="panel"><h2>2. 查看与复核申请</h2>
+<input id="requestId" type="number" placeholder="申请 ID"><button onclick="loadRequest()">查看申请</button><button onclick="reviewRequest()">复核确认</button></section>
+<section class="panel"><h2>3. 版本退役记录与副本状态</h2>
+<input id="versionId" type="number" placeholder="版本 ID"><button onclick="loadVersion()">查询</button></section>
+<pre id="out"></pre>
+<script>
+const out=document.querySelector("#out"),user=document.querySelector("#user");
+async function call(path,method="GET",body){const r=await fetch(path,{method,headers:{"X-User-Id":user.value,"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});const data=await r.json();out.textContent=JSON.stringify(data,null,2);return data}
+async function createRequest(){const id=document.querySelector("#copyId").value;const d=await call(`/api/copies/${id}/retirement-requests`,"POST",{successor_location:document.querySelector("#successor").value,custodian:document.querySelector("#custodian").value});if(d.id)document.querySelector("#requestId").value=d.id}
+async function loadRequest(){const id=document.querySelector("#requestId").value;await call(`/api/retirement-requests/${id}`)}
+async function reviewRequest(){const id=document.querySelector("#requestId").value;await call(`/api/retirement-requests/${id}/review`,"POST",{})}
+async function loadVersion(){const id=document.querySelector("#versionId").value;const h={"X-User-Id":user.value};const[detail,retirements]=await Promise.all([fetch(`/api/versions/${id}`,{headers:h}).then(r=>r.json()),fetch(`/api/versions/${id}/retirement-requests`,{headers:h}).then(r=>r.json())]);out.textContent=JSON.stringify({version:detail,retirements},null,2)}
+</script></body></html>
