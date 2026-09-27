@@ -1,0 +1,22 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>副本退役交接</title>
+<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}input,textarea,button,select{font:inherit;padding:8px;margin:4px}input{width:180px}.panel{border:1px solid #bbb;padding:16px;border-radius:8px;margin:12px 0}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}h2{font-size:1.1em}</style></head>
+<body><h1>副本退役交接</h1><p>更换离线介质时先登记接手位置与保管人，由另一名管理员复核：其余健康副本须完成内容比对、待退役副本最近核验须晚于版本生成，全部满足才确认，否则退回并列出阻塞项。<a href="/">返回首页</a></p>
+<section class="panel"><select id="user"><option>owner</option><option>archivist</option><option>auditor</option><option>outsider</option></select></section>
+<section class="panel"><h2>1. 申请退役（登记交接）</h2>
+<input id="copyId" placeholder="副本 ID" type="number"><input id="newLoc" placeholder="接手位置，如 offline-disk-c"><input id="custodian" placeholder="保管人"><input id="note" placeholder="备注（可选）">
+<button onclick="requestRetire()">提交申请，待复核</button></section>
+<section class="panel"><h2>2. 复核交接单</h2>
+<input id="rid" placeholder="交接单 ID" type="number">
+<button onclick="review('confirm')">确认退役</button><button onclick="review('reject')">退回</button><button onclick="loadRetirement()">查看交接单</button></section>
+<section class="panel"><h2>3. 版本详情追溯</h2>
+<input id="vid" placeholder="版本 ID" type="number"><button onclick="loadVersion()">查看版本与退役记录</button></section>
+<pre id="out"></pre>
+<script>
+const out=document.querySelector("#out"),user=document.querySelector("#user");
+const H=()=>({"X-User-Id":user.value,"Content-Type":"application/json"});
+async function show(r){out.textContent=JSON.stringify(await r.json(),null,2)}
+async function requestRetire(){const r=await fetch(`/api/copies/${copyId.value}/retirement`,{method:"POST",headers:H(),body:JSON.stringify({new_location:newLoc.value,custodian:custodian.value,note:note.value})});await show(r)}
+async function review(decision){const r=await fetch(`/api/retirements/${rid.value}/review`,{method:"POST",headers:H(),body:JSON.stringify({decision,note:note.value})});await show(r)}
+async function loadRetirement(){const r=await fetch(`/api/retirements/${rid.value}`,{headers:H()});await show(r)}
+async function loadVersion(){const r=await fetch(`/api/versions/${vid.value}`,{headers:H()});await show(r)}
+</script></body></html>

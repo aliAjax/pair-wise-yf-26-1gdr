@@ -25,7 +25,8 @@ class BusinessError(Exception):
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # 微秒精度，便于区分版本生成与副本核验的先后（退役复核需核验晚于生成）
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def verify_manifest(files: object) -> list[dict]:
@@ -146,6 +147,9 @@ class PreservationStore:
                 );
                 """
             )
+            # 副本退役交接的补充表结构（独立业务文件：retirement_schema.py）
+            from retirement_schema import apply_schema
+            apply_schema(conn)
 
     def seed(self) -> None:
         self.init_schema()
@@ -308,7 +312,10 @@ class PreservationStore:
                 "SELECT id,location,state,last_verified_at FROM copies WHERE version_id=? ORDER BY id", (version_id,)
             ).fetchall()
             archive = conn.execute("SELECT * FROM archives WHERE id=?", (version["archive_id"],)).fetchone()
-            return {"version": dict(version), "archive": dict(archive), "files": [dict(x) for x in files], "copies": [dict(x) for x in copies]}
+            payload = {"version": dict(version), "archive": dict(archive), "files": [dict(x) for x in files], "copies": [dict(x) for x in copies]}
+            # 挂接退役交接追溯（独立业务文件：retirement_rules.py）
+            from retirement_rules import RetirementRules
+            return RetirementRules.annotate_version_detail(conn, payload)
 
     def verify_copy(self, user_id: str, copy_id: int) -> dict:
         with self.connect() as conn:
@@ -318,6 +325,8 @@ class PreservationStore:
                 copy = conn.execute("SELECT * FROM copies WHERE id=?", (copy_id,)).fetchone()
                 if not copy:
                     raise BusinessError("副本不存在", 404, "not_found")
+                if copy["state"] == "retired":
+                    raise BusinessError("该副本已退役留档，不能再核验或修复", 409, "copy_retired")
                 version = conn.execute("SELECT * FROM archive_versions WHERE id=?", (copy["version_id"],)).fetchone()
                 self._access(conn, version["archive_id"], user)
                 stored = conn.execute(
@@ -372,6 +381,8 @@ class PreservationStore:
             copy = conn.execute("SELECT * FROM copies WHERE id=?", (copy_id,)).fetchone()
             if not copy:
                 raise BusinessError("副本不存在", 404, "not_found")
+            if copy["state"] == "retired":
+                raise BusinessError("该副本已退役留档", 409, "copy_retired")
             version = conn.execute("SELECT * FROM archive_versions WHERE id=?", (copy["version_id"],)).fetchone()
             self._access(conn, version["archive_id"], user, require_write=True)
             row = conn.execute("SELECT content FROM copy_files WHERE copy_id=? AND path=?", (copy_id, path)).fetchone()
@@ -486,6 +497,27 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/health":
             return self._send(200, {"ok": True})
         store = self._store()
+        if method == "GET" and path == "/retirement":
+            # 副本退役交接页面（独立业务文件：retirement_api.py）
+            import retirement_api
+            body = retirement_api.page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        # 副本退役交接 API（独立业务文件：retirement_api.py）
+        is_retirement_route = (
+            (method == "POST" and len(parts) == 4 and parts[:2] == ["api", "copies"] and parts[3] == "retirement")
+            or (method == "POST" and len(parts) == 4 and parts[:2] == ["api", "retirements"] and parts[3] == "review")
+            or (method == "GET" and len(parts) == 3 and parts[:2] == ["api", "retirements"])
+        )
+        if is_retirement_route:
+            import retirement_api
+            routed = retirement_api.dispatch(method, parts, self._body() if method == "POST" else {}, user, store)
+            if routed is not None:
+                return self._send(routed[0], routed[1])
         if parts == ["api", "archives"] and method == "POST":
             d = self._body()
             return self._send(201, store.create_archive(user, d.get("name", ""), d.get("retention_until", ""), bool(d.get("restricted", True))))
@@ -562,4 +594,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    # 以脚本方式运行时，扩展业务文件通过 `from app import ...` 引用本模块；
+    # 注册别名避免 app.py 被重复导入成两个模块（异常类型、工具函数需保持同一对象）
+    sys.modules.setdefault("app", sys.modules[__name__])
     main()
